@@ -1,5 +1,6 @@
 import os
 import sys
+import cv2
 
 # Flask
 from flask import Flask, redirect, url_for, request, render_template, Response, jsonify, redirect
@@ -8,11 +9,7 @@ from gevent.pywsgi import WSGIServer
 
 # TensorFlow and tf.keras
 import tensorflow as tf
-from tensorflow import keras
 
-from tensorflow.keras.applications.imagenet_utils import preprocess_input, decode_predictions
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing import image
 
 # Some utilites
 import numpy as np
@@ -25,35 +22,69 @@ app = Flask(__name__)
 
 # You can use pretrained model from Keras
 # Check https://keras.io/applications/
-from keras.applications.mobilenet_v2 import MobileNetV2
-model = MobileNetV2(weights='imagenet')
+#from keras.applications.mobilenet_v2 import MobileNetV2
+#from keras.applications.vgg16 import VGG16
+#model = MobileNetV2(weights='imagenet')
+#model = VGG16(weights='imagenet', include_top=True)
 
-print('Model loaded. Check http://127.0.0.1:5000/')
+#print('Model loaded. Check http://127.0.0.1:5000/')
 
 
 # Model saved with Keras model.save()
-MODEL_PATH = 'models/your_model.h5'
+#MODEL_PATH = 'models/model-2069.data-00000-of-00001'
+weightspath = 'models'
+metaname = 'model.meta_eval'
+ckptname = 'model-2069'
+
+global mapping, inv_mapping
+
+mapping = {'normal': 0, 'pneumonia': 1, 'COVID-19': 2}
+inv_mapping = {0: 'normal', 1: 'pneumonia', 2: 'COVID-19'}
 
 # Load your own trained model
-# model = load_model(MODEL_PATH)
-# model._make_predict_function()          # Necessary
-# print('Model loaded. Start serving...')
+#model = load_model(MODEL_PATH)
+#model._make_predict_function()          # Necessary
+print('Model loaded. Start serving...')
 
 
-def model_predict(img, model):
-    img = img.resize((224, 224))
+def model_predict(image, path=weightspath, meta=metaname, ckpt=ckptname):
+    
+    sess = tf.Session()
+    #tf.reset_default_graph()
+    
+    
+    new_graph = tf.Graph()
+    with tf.Session(graph=new_graph) as sess:
+        # Import the previously export meta graph.
+        saver = tf.train.import_meta_graph(os.path.join(weightspath, metaname))
 
-    # Preprocessing the image
-    x = image.img_to_array(img)
-    # x = np.true_divide(x, 255)
-    x = np.expand_dims(x, axis=0)
+        saver.restore(sess, os.path.join(weightspath, ckptname))
 
-    # Be careful how your trained model deals with the input
-    # otherwise, it won't make correct prediction!
-    x = preprocess_input(x, mode='tf')
+        graph = tf.get_default_graph()
 
-    preds = model.predict(x)
-    return preds
+        image_tensor = graph.get_tensor_by_name("input_1:0")
+        pred_tensor = graph.get_tensor_by_name("dense_3/Softmax:0")
+
+        #x = cv2.imread(image)
+        x = np.array(image)
+        x = x[:, :, ::-1].copy() 
+        x = cv2.resize(x, (224, 224))
+        x = x.astype('float32') / 255.0
+        pred = sess.run(pred_tensor, feed_dict={image_tensor: np.expand_dims(x, axis=0)})
+
+    print('Prediction: {}'.format(inv_mapping[pred.argmax(axis=1)[0]]))
+    print(pred)
+    
+    if inv_mapping[pred.argmax(axis=1)[0]] == 'normal':
+        pred_proba = pred[0][0]
+    elif inv_mapping[pred.argmax(axis=1)[0]] == 'pneumonia':
+        pred_proba = pred[0][1]
+    else:
+        pred_proba = pred[0][2]
+
+    print(pred_proba)
+    return inv_mapping[pred.argmax(axis=1)[0]], pred_proba
+
 
 
 @app.route('/', methods=['GET'])
@@ -65,24 +96,22 @@ def index():
 @app.route('/predict', methods=['GET', 'POST'])
 def predict():
     if request.method == 'POST':
+        #print(request.json)
         # Get the image from post request
         img = base64_to_pil(request.json)
-
+        #print(img)
         # Save the image to ./uploads
         # img.save("./uploads/image.png")
 
         # Make prediction
-        preds = model_predict(img, model)
+        preds, preds_proba = model_predict(image=img)
+        #print(preds)
+        preds_proba = "{:.3f}".format(preds_proba) 
 
-        # Process your result for human
-        pred_proba = "{:.3f}".format(np.amax(preds))    # Max probability
-        pred_class = decode_predictions(preds, top=1)   # ImageNet Decode
-
-        result = str(pred_class[0][0][1])               # Convert to string
-        result = result.replace('_', ' ').capitalize()
+        result = preds.replace('_', ' ').capitalize()
         
         # Serialize the result, you can add additional fields
-        return jsonify(result=result, probability=pred_proba)
+        return jsonify(result=result, probability=preds_proba)
 
     return None
 
